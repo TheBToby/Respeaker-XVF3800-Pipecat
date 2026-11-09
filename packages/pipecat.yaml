@@ -41,6 +41,18 @@ substitutions:
   # Microphone level (normalized 0.0-1.0) above which the watchdog treats
   # the microphone as active and re-arms the silence timer.
   pipecat_voice_threshold: "0.05"
+  # Minimum time between two handled wake word detections. micro_wake_word
+  # keeps running after a detection, and one utterance can fire a second
+  # detection ~150 ms later; without the debounce that echo tears down
+  # whatever the first detection just started (the wake loop).
+  pipecat_wake_debounce_ms: "1000"
+
+globals:
+  # millis() timestamp of the last handled wake word detection (debounce).
+  - id: pipecat_last_wake_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 external_components:
   - source:

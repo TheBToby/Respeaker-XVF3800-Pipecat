@@ -1,138 +1,151 @@
 # =============================================================================
 # Respeaker XVF3800 satellite — Pipecat wake word handler
 #
-# Replacement for the wake word handler of the voice satellite core. The core
-# handler always starts the Home Assistant Assist pipeline. This one branches
-# on the "Assistant source" select of pipecat.yaml:
+# Replacement for the wake word handler of the voice satellite core. It
+# branches on the "Assistant source" select of pipecat.yaml:
 #
 # - "Pipecat realtime": the wake word opens a Pipecat conversation on the
 #   WebSocket of the va_pipecat component. If the Pipecat connection is down,
-#   the handler falls back to the Assist pipeline.
-# - "Home Assistant Assist": the behavior of the core.
+#   the handler falls back to the Assist pipeline. A stray native pipeline
+#   from an earlier fallback is closed first, so it cannot loop with the
+#   wake word.
+# - "Home Assistant Assist": the behavior of the core (a wake word stops a
+#   running assistant, cancels an announcement, or starts the pipeline).
+#
+# Every handled detection updates the pipecat_last_wake_ms global, and
+# detections within pipecat_wake_debounce_ms are ignored: micro_wake_word
+# keeps running after a detection and one utterance can fire a second
+# detection ~150 ms later, which otherwise tears down what the first
+# detection just started.
 #
 # ESPHome joins trigger lists from all packages, and a key cannot be removed
 # and re-added in one document. So pipecat.yaml removes the core handler with
 # "on_wake_word_detected: !remove" and this file adds the replacement.
 # Include this file after pipecat.yaml.
 #
-# Everything except the start branch mirrors the core handler (Respeaker-Lite
-# voice-assistant.yaml): the mute gate, the wake word event, the ringing
-# timer handling with "Snooze", and the wake sound.
+# Everything except the start branches mirrors the core handler
+# (Respeaker-Lite voice-assistant.yaml): the mute gate, the wake word event,
+# the ringing timer handling with "Snooze", and the wake sound.
 # =============================================================================
 
 micro_wake_word:
   on_wake_word_detected:
-    # If the wake word is detected when the device is muted (possible with
-    # the software mute switch): do nothing.
+    # Debounce echo detections of the same utterance.
     - if:
         condition:
-          switch.is_off: mic_mute_switch
+          lambda: |-
+            uint32_t now = millis();
+            if (id(pipecat_last_wake_ms) != 0 && now - id(pipecat_last_wake_ms) < ${pipecat_wake_debounce_ms}) {
+              return false;
+            }
+            id(pipecat_last_wake_ms) = now;
+            return true;
         then:
-          - script.execute:
-              id: send_wake_word_event
-              wake_word: !lambda return wake_word;
-          # If a timer is ringing: stop it, do not start a conversation (we
-          # can stop a timer from voice!). "Snooze" stops it too, and rings
-          # again later.
+          # If the wake word is detected when the device is muted (possible
+          # with the software mute switch): do nothing.
           - if:
               condition:
-                switch.is_on: timer_ringing
+                switch.is_off: mic_mute_switch
               then:
+                - script.execute:
+                    id: send_wake_word_event
+                    wake_word: !lambda return wake_word;
+                # If a timer is ringing: stop it, do not start a conversation
+                # (we can stop a timer from voice!). "Snooze" stops it too,
+                # and rings again later.
                 - if:
                     condition:
-                      lambda: return wake_word == "Snooze";
+                      switch.is_on: timer_ringing
                     then:
-                      - logger.log:
-                          level: INFO
-                          format: "Wake word: snoozing the ringing timer"
-                      - script.execute: snooze_ring
-                    else:
-                      - logger.log:
-                          level: INFO
-                          format: "Wake word ignored: stopping the ringing timer"
-                      - switch.turn_off: timer_ringing
-              # Stop the voice assistant if it runs
-              else:
-                - if:
-                    condition:
-                      voice_assistant.is_running:
-                    then:
-                      - logger.log:
-                          level: INFO
-                          format: "Wake word ignored: stopping the running voice assistant"
-                      - voice_assistant.stop:
-                    # Stop any other media player announcement
-                    else:
                       - if:
                           condition:
-                            media_player.is_announcing:
-                              id: external_media_player
+                            lambda: return wake_word == "Snooze";
                           then:
                             - logger.log:
                                 level: INFO
-                                format: "Wake word ignored: stopping the announcement"
-                            - media_player.stop:
-                                announcement: true
-                                id: external_media_player
-                          # Start a conversation. The "Assistant source"
-                          # select decides which backend.
+                                format: "Wake word: snoozing the ringing timer"
+                            - script.execute: snooze_ring
                           else:
+                            - logger.log:
+                                level: INFO
+                                format: "Wake word ignored: stopping the ringing timer"
+                            - switch.turn_off: timer_ringing
+                    else:
+                      # "Pipecat realtime": the branches below.
+                      - if:
+                          condition:
+                            lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
+                          then:
+                            # "Stop": interrupt the reply while the assistant
+                            # speaks, close the window otherwise. The stop
+                            # model is only enabled during an open window
+                            # (pipecat.yaml), so this never starts anything.
                             - if:
                                 condition:
                                   lambda: return wake_word == "stop";
                                 then:
-                                  # The "stop" model is only enabled while a
-                                  # Pipecat conversation is open (pipecat.yaml)
-                                  # or while the native pipeline speaks (the
-                                  # core enables it, and that case is handled
-                                  # by the running-assistant branch above), so
-                                  # "stop" never starts a conversation. In an
-                                  # open Pipecat window: while the assistant
-                                  # speaks, stop the reply and keep the
-                                  # window; otherwise close the conversation.
                                   - if:
                                       condition:
-                                        and:
-                                          - va_pipecat.connected: pipecat_va
-                                          - lambda: 'return id(voice_assistant_phase) == ${voice_assist_replying_phase_id};'
+                                        va_pipecat.connected: pipecat_va
                                       then:
-                                        - logger.log:
-                                            level: INFO
-                                            format: "Stop word: interrupting the Pipecat reply"
-                                        - va_pipecat.interrupt: pipecat_va
-                                      else:
                                         - if:
                                             condition:
-                                              va_pipecat.connected: pipecat_va
+                                              lambda: 'return id(voice_assistant_phase) == ${voice_assist_replying_phase_id};'
                                             then:
+                                              - logger.log:
+                                                  level: INFO
+                                                  format: "Stop word: interrupting the Pipecat reply"
+                                              - va_pipecat.interrupt: pipecat_va
+                                            else:
                                               - logger.log:
                                                   level: INFO
                                                   format: "Stop word: closing the Pipecat conversation"
                                               - va_pipecat.stop: pipecat_va
-                                # A real wake word: start the selected backend.
-                                else:
+                            # A real wake word.
+                            - if:
+                                condition:
+                                  lambda: return wake_word != "stop";
+                                then:
+                                  # Close a stray native pipeline left over
+                                  # from an earlier fallback, so it cannot
+                                  # loop with the wake word below.
                                   - if:
                                       condition:
-                                        and:
-                                          - lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
-                                          - va_pipecat.connected: pipecat_va
+                                        voice_assistant.is_running:
+                                      then:
+                                        - logger.log:
+                                            level: INFO
+                                            format: "Pipecat wake: stopping the stray native voice assistant"
+                                        - voice_assistant.stop:
+                                  # An announcement would talk over the chime.
+                                  - if:
+                                      condition:
+                                        media_player.is_announcing:
+                                          id: external_media_player
+                                      then:
+                                        - media_player.stop:
+                                            announcement: true
+                                            id: external_media_player
+                                  - if:
+                                      condition:
+                                        va_pipecat.connected: pipecat_va
                                       then:
                                         - if:
                                             condition:
-                                              # A conversation window is already
-                                              # open (listening, thinking, or
-                                              # speaking).
+                                              # A conversation window is
+                                              # already open (listening,
+                                              # thinking, or speaking).
                                               lambda: |-
                                                 int p = id(voice_assistant_phase);
                                                 return p == ${voice_assist_listening_for_command_phase_id} || p == ${voice_assist_thinking_phase_id} || p == ${voice_assist_replying_phase_id};
                                             then:
                                               # Hard reset: close the open
                                               # conversation, killing any
-                                              # phantom utterance that the wake
-                                              # word audio created on the
-                                              # server, then start a clean
-                                              # turn. No chime: the window was
-                                              # already announced.
+                                              # phantom utterance that the
+                                              # wake word audio created on
+                                              # the server, then start a
+                                              # clean turn. No chime: the
+                                              # window was already announced.
                                               - logger.log:
                                                   level: INFO
                                                   format: "Wake word: restarting the open Pipecat conversation"
@@ -159,16 +172,11 @@ micro_wake_word:
                                               - lambda: id(respeaker).lock_beam();
                                         - va_pipecat.start: pipecat_va
                                       else:
-                                        - if:
-                                            condition:
-                                              lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
-                                            then:
-                                              - logger.log:
-                                                  level: WARN
-                                                  format: "Pipecat is not connected, starting the Assist pipeline"
-                                        # The Assist pipeline of the core,
-                                        # unchanged: wake sound, hook (beam
-                                        # lock), and the pipeline start.
+                                        # Pipecat is not connected: fall back
+                                        # to the Assist pipeline of the core.
+                                        - logger.log:
+                                            level: WARN
+                                            format: "Pipecat is not connected, starting the Assist pipeline"
                                         - if:
                                             condition:
                                               switch.is_on: wake_sound
@@ -185,3 +193,58 @@ micro_wake_word:
                                         # locks its beam to the speaker
                                         # direction.
                                         - script.execute: wake_word_start_hook
+                      # "Home Assistant Assist": the semantics of the core
+                      # handler. A wake word stops a running assistant,
+                      # cancels an announcement, or starts the pipeline.
+                      - if:
+                          condition:
+                            lambda: 'return id(assistant_source).current_option() != "Pipecat realtime";'
+                          then:
+                            - if:
+                                condition:
+                                  voice_assistant.is_running:
+                                then:
+                                  - logger.log:
+                                      level: INFO
+                                      format: "Wake word ignored: stopping the running voice assistant"
+                                  - voice_assistant.stop:
+                            - if:
+                                condition:
+                                  and:
+                                    - not:
+                                        voice_assistant.is_running:
+                                    - media_player.is_announcing:
+                                        id: external_media_player
+                                then:
+                                  - logger.log:
+                                      level: INFO
+                                      format: "Wake word ignored: stopping the announcement"
+                                  - media_player.stop:
+                                      announcement: true
+                                      id: external_media_player
+                            - if:
+                                condition:
+                                  and:
+                                    - not:
+                                        voice_assistant.is_running:
+                                    - not:
+                                        media_player.is_announcing:
+                                          id: external_media_player
+                                then:
+                                  # Start the voice assistant and play the
+                                  # wake sound, if enabled.
+                                  - if:
+                                      condition:
+                                        switch.is_on: wake_sound
+                                      then:
+                                        - script.execute:
+                                            id: play_sound
+                                            priority: true
+                                            sound_file: "wake_word_triggered_sound"
+                                        - delay: 300ms
+                                  - voice_assistant.start:
+                                      wake_word: !lambda return wake_word;
+                                  # Device hook, empty here. See the script
+                                  # in the core. The XVF3800 locks its beam
+                                  # to the speaker direction.
+                                  - script.execute: wake_word_start_hook

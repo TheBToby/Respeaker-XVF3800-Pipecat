@@ -202,6 +202,7 @@ substitution in a package.
 | `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
 | `pipecat_silence_timeout_seconds` | `"4"` | Starting value of the **Pipecat silence timeout** number entity |
 | `pipecat_voice_threshold` | `"0.05"` | Microphone level (0.0-1.0) above which the silence watchdog treats the microphone as active |
+| `pipecat_wake_debounce_ms` | `"1000"` | Minimum time between two handled wake word detections. micro_wake_word keeps running after a detection, and one utterance can fire a second detection ~150 ms later that would otherwise tear down what the first detection started |
 | `hidden_ssid` | `"false"` | Set this to `"true"` for a hidden network |
 | `log_level` | `INFO` | Logger level |
 | `voice_assist_*_phase_id` | `1` to `11` | Phase constants for the LED ring |
@@ -254,9 +255,12 @@ closes when any of these happens first:
   "goodbye" or "that's all".
 
 While the assistant speaks, you can also just talk over it (barge-in): the
-XVF3800 echo cancellation feeds the server VAD, which cancels the reply. The
-LED ring, the wake sound, the media ducking, the beam lock, and the volume
-behave the same for both backends.
+XVF3800 echo cancellation feeds the server VAD, which cancels the reply. Rapid
+echo detections of the same wake word are debounced
+(`pipecat_wake_debounce_ms`), and if the Pipecat connection drops, a stray
+native pipeline from a fallback is cleaned up on the next wake. The LED ring,
+the wake sound, the media ducking, the beam lock, and the volume behave the
+same for both backends.
 
 ### Set up Home Assistant
 
