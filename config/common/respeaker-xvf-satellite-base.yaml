@@ -12,3 +12,8 @@ packages:
   voice_assistant: !include ../../packages/voice-assistant.yaml
   leds: !include ../../packages/leds.yaml
   timers_alarm: !include ../../packages/timers-alarm.yaml
+  # The Pipecat realtime assistant. pipecat.yaml removes the wake word
+  # handler of the core, and pipecat-wake.yaml adds the replacement, so the
+  # order matters: wake comes last.
+  pipecat: !include ../../packages/pipecat.yaml
+  pipecat_wake: !include ../../packages/pipecat-wake.yaml

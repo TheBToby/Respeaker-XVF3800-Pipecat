@@ -84,7 +84,8 @@ speaker:
     buffer_duration: 100ms
     audio_dac: aic3104_dac
 
-  # Virtual speakers to combine the announcement and media streams together into one output
+  # Virtual speakers to combine the announcement, media, and Pipecat streams
+  # together into one output
   - platform: mixer
     id: mixing_speaker
     output_speaker: i2s_audio_speaker
@@ -94,6 +95,8 @@ speaker:
       - id: announcement_mixing_input
         timeout: never
       - id: media_mixing_input
+        timeout: never
+      - id: pipecat_mixing_input
         timeout: never
 
   # Virtual speakers to resample each pipelines' audio, if necessary, as the mixer speaker requires the same sample rate
@@ -106,6 +109,13 @@ speaker:
     id: media_resampling_speaker
     output_speaker: media_mixing_input
     sample_rate: 48000
+    bits_per_sample: 16
+  # Pipecat realtime assistant. The va_pipecat downlink is PCM16 mono at
+  # 24 kHz. The resampler brings it to the mixer rate of 48 kHz.
+  - platform: resampler
+    id: pipecat_resampling_speaker
+    output_speaker: pipecat_mixing_input
+    sample_rate: 24000
     bits_per_sample: 16
 
 respeaker_xvf3800:

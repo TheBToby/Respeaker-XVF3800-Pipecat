@@ -19,7 +19,10 @@ substitutions:
 
 packages:
   respeaker:
-    url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+    # This fork adds the Pipecat realtime assistant on top of the baseline.
+    # Pin a release tag here once you have tagged one; "main" follows the
+    # newest code.
+    url: https://github.com/TheBToby/Respeaker-XVF3800-Pipecat
     ref: ${respeaker_ref}
     refresh: 1d
     files:
@@ -28,6 +31,11 @@ packages:
       - packages/voice-assistant.yaml
       - packages/leds.yaml
       - packages/timers-alarm.yaml
+      # pipecat.yaml removes the wake word handler of the core, and
+      # pipecat-wake.yaml adds the replacement, so the order matters: wake
+      # comes last.
+      - packages/pipecat.yaml
+      - packages/pipecat-wake.yaml
 
 # A remote package cannot read secrets, so the credentials go here.
 # ESPHome joins these blocks with the blocks in the packages.

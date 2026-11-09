@@ -35,6 +35,10 @@ The device gives these entities to Home Assistant:
 | Snooze pending | binary sensor | Shows that a snoozed ring waits to start again |
 | Cancel snooze | button | Cancels a snoozed ring |
 | Wake word sensitivity | select | Sets the wake word threshold |
+| Assistant source | select | Chooses what the wake word starts: Pipecat realtime or the Home Assistant Assist pipeline |
+| Pipecat connected | binary sensor | Shows that the Pipecat WebSocket is connected |
+| Pipecat phase | text sensor | Shows the phase of the Pipecat conversation |
+| Stop Pipecat conversation | button | Ends the running Pipecat conversation |
 | DSP route | select | Chooses what each DSP output channel feeds |
 | ASR output gain | number | Gain on the ASR output (wake word; STT on the ASR route) |
 | AGC max gain (comms) | number | Maximum AGC gain of the comms output (STT on the default route) |
@@ -56,6 +60,9 @@ The **LED Ring** light controls the 12-LED ring. Read
 
 - ESPHome **2026.10.0** or later.
 - Home Assistant with the ESPHome integration.
+- For the Pipecat realtime assistant: the
+  [Pipecat Assist add-on](https://github.com/kyvaith/pipecat-homeassistant)
+  in Home Assistant. Read [Pipecat realtime assistant](#pipecat-realtime-assistant).
 - A reSpeaker XVF3800 USB 4-Mic Array board.
 - A USB-C cable and a computer that can flash the board.
 
@@ -95,7 +102,7 @@ substitutions:
 
 packages:
   respeaker:
-    url: https://github.com/formatBCE/Respeaker-XVF3800-ESPHome-integration
+    url: https://github.com/TheBToby/Respeaker-XVF3800-Pipecat
     ref: ${respeaker_ref}
     refresh: 1d
     files:
@@ -104,6 +111,11 @@ packages:
       - packages/voice-assistant.yaml
       - packages/leds.yaml
       - packages/timers-alarm.yaml
+      # pipecat.yaml removes the wake word handler of the core, and
+      # pipecat-wake.yaml adds the replacement, so the order matters: wake
+      # comes last.
+      - packages/pipecat.yaml
+      - packages/pipecat-wake.yaml
 
 # A remote package cannot read secrets, so the credentials go here.
 # ESPHome joins these blocks with the blocks in the packages.
@@ -184,6 +196,8 @@ substitution in a package.
 | `friendly_name` | `reSpeaker XVF3800 Assistant` | Display name |
 | `respeaker_ref` | the current release, for example `2026.9.1` | Release for the packages, the components, and the firmware |
 | `respeaker_lite_ref` | a Respeaker Lite release, set by each release | Release of the voice satellite core. Read [Package layout](#package-layout) |
+| `va_pipecat_ref` | `v0.2.7` | Release of kyvaith/pipecat-homeassistant that holds the `va_pipecat` component. Set it to `main` to follow the newest code |
+| `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
 | `hidden_ssid` | `"false"` | Set this to `"true"` for a hidden network |
 | `log_level` | `INFO` | Logger level |
 | `voice_assist_*_phase_id` | `1` to `11` | Phase constants for the LED ring |
@@ -191,6 +205,63 @@ substitution in a package.
 
 **Caution:** All substitutions share one namespace. A name that you set in your
 configuration replaces that name in every package.
+
+---
+
+## Pipecat realtime assistant
+
+The fork adds the `va_pipecat` ESPHome component of
+[kyvaith/pipecat-homeassistant](https://github.com/kyvaith/pipecat-homeassistant).
+It connects the device to the **Pipecat Assist add-on**, which runs realtime,
+speech-to-speech models (Gemini Live by default) or custom Pipecat pipelines on
+the Home Assistant host, and keeps Home Assistant device control through MCP.
+The device streams microphone audio to the add-on and plays the assistant
+audio; the assistant talks back in realtime, with barge-in, follow-up
+questions, and live transcripts.
+
+The wake word keeps working exactly as before. The **Assistant source** select
+decides what it starts:
+
+- **Pipecat realtime** — opens a Pipecat conversation. If the Pipecat
+  connection is down, the wake word falls back to the Home Assistant Assist
+  pipeline, so the device always answers.
+- **Home Assistant Assist** — the classic HA pipeline of the voice satellite
+  core, unchanged.
+
+While Pipecat speaks, the internal "Stop" wake word interrupts the reply. The
+LED ring, the wake sound, the media ducking, the beam lock, and the volume
+behave the same for both backends.
+
+### Set up Home Assistant
+
+1. Add `https://github.com/kyvaith/pipecat-homeassistant` as an add-on
+   repository (**Settings > Add-ons > Add-on Store > Repositories**), and
+   install the **Pipecat Assist** add-on.
+2. Start the add-on and follow its setup: pick or build a pipeline, and set
+   the satellite secret. Read the add-on documentation for the details.
+3. Optional: install the `pipecat_assist` integration through HACS to get a
+   Pipecat conversation agent in Home Assistant.
+
+Nothing to configure on the device. The add-on discovers the satellite
+through Home Assistant and pushes the authenticated WebSocket endpoint to it
+every 15 seconds (`auto_provision`), so the device reconnects itself after a
+restart, a Wi-Fi drop, or an add-on restart. The **Pipecat connected** binary
+sensor shows the state, the **Pipecat phase** text sensor shows the live
+conversation phase, and **Stop Pipecat conversation** ends a conversation by
+hand.
+
+### Notes
+
+- The voice-created timers of the timers package are Home Assistant timers.
+  With **Pipecat realtime**, you create them through the Pipecat pipeline
+  (the add-on gives the model Home Assistant tools over MCP); the device
+  still rings, snoozes, and shows them either way.
+- Adopting a device from the upstream web installer or the upstream release
+  imports the formatBCE packages, which do not include Pipecat. Build from
+  this repository to get it.
+- The add-on resolves the device-reachable host from the Home Assistant
+  `internal_url`. If your device cannot reach that hostname, set the
+  **Device-reachable host override** in the add-on runtime settings.
 
 ---
 
@@ -334,11 +405,15 @@ sounds. Koala Satellite and the Respeaker Lite use the same core. The
 | `voice-assistant.yaml` | The beam lock, the wake word gain, the volume range and the volume display of the media player |
 | `leds.yaml` | LED globals, the animation interval, the effect scripts, the colour preset |
 | `timers-alarm.yaml` | The timer animation of the LED ring |
+| `pipecat.yaml` | The Pipecat realtime assistant: the `va_pipecat` component, the `Assistant source` select, the phase mapping, and the `!remove` of the core wake word handler |
+| `pipecat-wake.yaml` | The replacement wake word handler with the Pipecat/Assist branch and the fallback |
 
-**Caution:** Include all five packages. They are separate files for maintenance,
+**Caution:** Include all seven packages. They are separate files for maintenance,
 but they are not independent. The `leds.yaml` package reads entities from the
 core and from `hardware.yaml`. The `control_leds` script runs from `wifi`,
-`api`, `on_boot`, and 12 voice assistant triggers. If you remove one file, the
+`api`, `on_boot`, and 12 voice assistant triggers. `pipecat-wake.yaml` must
+come after `pipecat.yaml`, and the device does not react to wake words without
+both. If you remove one file, the
 build fails.
 
 To change one part, use `!extend` or `!remove`. Do not delete a package.

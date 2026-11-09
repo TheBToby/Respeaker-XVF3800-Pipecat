@@ -1,0 +1,191 @@
+# =============================================================================
+# Respeaker XVF3800 satellite — Pipecat Assist package
+#
+# Adds the Pipecat realtime assistant (kyvaith/pipecat-homeassistant) next to
+# the Home Assistant Assist pipeline. The "Assistant source" select decides
+# which backend the wake word starts. When Pipecat is selected but its
+# WebSocket is down, the wake word falls back to the Assist pipeline. The
+# wake word handler that does this lives in pipecat-wake.yaml; include that
+# file after this one.
+#
+# Auto connectivity: the Pipecat Assist add-on discovers this device through
+# Home Assistant and pushes the authenticated WebSocket endpoint into the
+# hidden provision_pipecat native API action every 15 seconds
+# ("auto_provision"). Nothing to configure on the device: install the add-on,
+# set its satellite secret, and the device reconnects itself after every
+# restart. "api: custom_services: true" below is required for that action.
+#
+# This package removes the wake word handler of the voice satellite core
+# ("on_wake_word_detected: !remove"). ESPHome joins trigger lists from all
+# packages and cannot remove and re-add one key in a single document, so the
+# replacement handler is in pipecat-wake.yaml.
+#
+# Do not include this file without pipecat-wake.yaml, or the device will not
+# react to wake words.
+# =============================================================================
+
+substitutions:
+  # Release of kyvaith/pipecat-homeassistant that holds the va_pipecat
+  # component. Set it to "main" to follow the newest code.
+  va_pipecat_ref: v0.2.7
+  # Barge-in needs a microphone path with echo control. i2s_mics channel 0 is
+  # the XVF3800 "comms" output with AEC, so it qualifies. Set this to "false"
+  # if the assistant hears itself and answers to its own voice.
+  pipecat_barge_in: "true"
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/kyvaith/pipecat-homeassistant
+      ref: ${va_pipecat_ref}
+    components:
+      - va_pipecat
+    refresh: 1d
+
+api:
+  # The hidden provision_pipecat action of va_pipecat is a dynamic native API
+  # action. The Pipecat Assist add-on calls it to push the endpoint.
+  custom_services: true
+
+micro_wake_word:
+  # The replacement handler is in pipecat-wake.yaml. Read the file header.
+  on_wake_word_detected: !remove
+
+select:
+  # Which backend the wake word starts. "Pipecat realtime" talks to a
+  # speech-to-speech model over the Pipecat Assist add-on. "Home Assistant
+  # Assist" runs the classic HA pipeline of the voice satellite core.
+  - platform: template
+    name: "Assistant source"
+    id: assistant_source
+    icon: "mdi:assistant"
+    entity_category: config
+    optimistic: true
+    restore_value: yes
+    initial_option: "Pipecat realtime"
+    options:
+      - "Pipecat realtime"
+      - "Home Assistant Assist"
+
+va_pipecat:
+  id: pipecat_va
+  auto_provision: true
+  barge_in: ${pipecat_barge_in}
+  microphone:
+    # Channel 0 is the DSP "comms" output with AEC and AGC, the same channel
+    # the native pipeline uses for STT.
+    microphone: i2s_mics
+    channels: 0
+  # The downlink arrives as PCM16 mono at 24 kHz. The resampler speaker
+  # (hardware.yaml) brings it to the mixer, so the assistant mixes with
+  # announcements and media.
+  speaker: pipecat_resampling_speaker
+  on_phase:
+    # Map the Pipecat phase onto the voice assistant phase id that drives the
+    # LED ring, so the ring behaves the same for both backends.
+    - lambda: |-
+        if (phase == "listening") {
+          id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+        } else if (phase == "thinking") {
+          // The server VAD closed the utterance: release the beam, like the
+          // native pipeline does at STT VAD end.
+          id(respeaker).unlock_beam();
+          id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+        } else if (phase == "speaking") {
+          id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+        } else {
+          // idle and thanks. Safety-net beam unlock, idempotent.
+          id(respeaker).unlock_beam();
+          id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+        }
+    # Duck music while the conversation runs, the same way the native
+    # pipeline ducks on start. Pipecat speaks through its own mixer input,
+    # so the duck does not lower the assistant itself.
+    - if:
+        condition:
+          lambda: 'return phase == "listening" || phase == "thinking" || phase == "speaking";'
+        then:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 20
+              duration: 0.0s
+        else:
+          - mixer_speaker.apply_ducking:
+              id: media_mixing_input
+              decibel_reduction: 0
+              duration: 1.0s
+    # Scale the assistant output to the media player volume at the start of
+    # every turn, so the volume of announcements and of the assistant match.
+    - if:
+        condition:
+          lambda: 'return phase == "listening";'
+        then:
+          - va_pipecat.set_volume:
+              id: pipecat_va
+              volume: !lambda return id(external_media_player).volume;
+    # Enable the internal "stop" wake word while the assistant speaks, so
+    # "Stop" interrupts the reply like it stops a native response. While a
+    # timer or the alarm rings, timers-alarm.yaml owns the model.
+    - if:
+        condition:
+          and:
+            - lambda: 'return phase == "speaking";'
+            - switch.is_off: timer_ringing
+        then:
+          - micro_wake_word.enable_model: stop
+    - if:
+        condition:
+          and:
+            - lambda: 'return phase != "speaking";'
+            - switch.is_off: timer_ringing
+        then:
+          - micro_wake_word.disable_model: stop
+    - text_sensor.template.publish:
+        id: pipecat_phase
+        state: !lambda return phase;
+    - script.execute: control_leds
+  on_transcript:
+    - logger.log:
+        level: INFO
+        format: "Pipecat %s: %s"
+        args: [role.c_str(), text.c_str()]
+  on_error:
+    - logger.log:
+        level: WARN
+        format: "Pipecat error %s: %s"
+        args: [code.c_str(), message.c_str()]
+    - lambda: |-
+        id(respeaker).unlock_beam();
+        id(voice_assistant_phase) = ${voice_assist_error_phase_id};
+    - script.execute: control_leds
+  on_repeated_failure:
+    - logger.log:
+        level: WARN
+        format: "Pipecat keeps failing to connect. Wake words use the Assist pipeline until it is back."
+    - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+    - script.execute: control_leds
+
+text_sensor:
+  - platform: template
+    id: pipecat_phase
+    name: "Pipecat phase"
+    icon: "mdi:state-machine"
+    entity_category: diagnostic
+    update_interval: never
+
+binary_sensor:
+  - platform: template
+    id: pipecat_connected
+    name: "Pipecat connected"
+    icon: "mdi:connection"
+    entity_category: diagnostic
+    lambda: return id(pipecat_va).is_connected();
+
+button:
+  - platform: template
+    name: "Stop Pipecat conversation"
+    id: stop_pipecat_conversation
+    icon: "mdi:stop-circle"
+    entity_category: config
+    on_press:
+      - va_pipecat.stop: pipecat_va
