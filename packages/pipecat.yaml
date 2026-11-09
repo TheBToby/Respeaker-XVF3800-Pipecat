@@ -33,14 +33,16 @@ substitutions:
   # if the assistant hears itself and answers to its own voice.
   pipecat_barge_in: "true"
   # Silence watchdog of the open conversation window: when the phase stays
-  # "listening" and no voice above pipecat_voice_threshold is heard for this
-  # many seconds, the conversation closes. This is the initial value of the
+  # "listening" for this many seconds without the server starting a new
+  # utterance, the conversation closes. This is the initial value of the
   # "Pipecat silence timeout" number entity; tune it in Home Assistant. Set
   # the entity to 0 to disable the watchdog.
   pipecat_silence_timeout_seconds: "4"
-  # Microphone level (normalized 0.0-1.0) above which the watchdog treats
-  # the microphone as active and re-arms the silence timer.
-  pipecat_voice_threshold: "0.05"
+  # Hard budget for one conversation: when a follow-up window opens and the
+  # conversation is older than this, it closes instead of listening again.
+  # Noise-triggered turns in a loud room re-open the window after every
+  # reply; the budget ends that cycle. 0 disables the budget.
+  pipecat_conversation_budget_seconds: "30"
   # Minimum time between two handled wake word detections. micro_wake_word
   # keeps running after a detection, and one utterance can fire a second
   # detection ~150 ms later; without the debounce that echo tears down
@@ -53,6 +55,18 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # millis() timestamp of the first listening entry of the current
+  # conversation (the reference for the conversation budget).
+  - id: pipecat_conversation_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # Phase id of the previous Pipecat phase, so a listening entry knows
+  # whether it starts a fresh conversation or re-opens a follow-up window.
+  - id: pipecat_prev_phase_id
+    type: int
+    restore_value: no
+    initial_value: '10'
 
 external_components:
   - source:
@@ -102,11 +116,38 @@ va_pipecat:
   # announcements and media.
   speaker: pipecat_resampling_speaker
   on_phase:
+    # Budget guard first: when a FOLLOW-UP window opens and the conversation
+    # is older than the budget, close it instead of listening again.
+    # Noise-triggered turns re-open windows after every reply; the budget
+    # ends that cycle. Fresh conversations reset the budget in the mapping
+    # below.
+    - if:
+        condition:
+          lambda: |-
+            int prev = id(pipecat_prev_phase_id);
+            bool follow_up = prev == ${voice_assist_listening_for_command_phase_id} || prev == ${voice_assist_thinking_phase_id} || prev == ${voice_assist_replying_phase_id};
+            return phase == "listening" && follow_up && ${pipecat_conversation_budget_seconds} > 0 &&
+                   id(pipecat_conversation_start_ms) != 0 &&
+                   millis() - id(pipecat_conversation_start_ms) > (uint32_t) ${pipecat_conversation_budget_seconds} * 1000;
+        then:
+          - logger.log:
+              level: INFO
+              format: "Pipecat: conversation budget of %u s reached, closing the conversation"
+              args: ['(unsigned) ${pipecat_conversation_budget_seconds}']
+          - va_pipecat.stop: pipecat_va
     # Map the Pipecat phase onto the voice assistant phase id that drives the
-    # LED ring, so the ring behaves the same for both backends.
+    # LED ring, so the ring behaves the same for both backends. Also tracks
+    # fresh-vs-follow-up listening entries and the conversation start time.
     - lambda: |-
+        int prev = id(pipecat_prev_phase_id);
         if (phase == "listening") {
           id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+          // After idle (or at boot) this listening entry starts a new
+          // conversation and resets its budget; after thinking, speaking, or
+          // listening it only re-opens a follow-up window of the same one.
+          if (prev == ${voice_assist_idle_phase_id} || prev == ${voice_assist_error_phase_id} || prev == ${voice_assist_not_ready_phase_id}) {
+            id(pipecat_conversation_start_ms) = millis();
+          }
         } else if (phase == "thinking") {
           // The server VAD closed the utterance: release the beam, like the
           // native pipeline does at STT VAD end.
@@ -119,6 +160,7 @@ va_pipecat:
           id(respeaker).unlock_beam();
           id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
         }
+        id(pipecat_prev_phase_id) = id(voice_assistant_phase);
     # Duck music while the conversation runs, the same way the native
     # pipeline ducks on start. Pipecat speaks through its own mixer input,
     # so the duck does not lower the assistant itself.
@@ -180,16 +222,6 @@ va_pipecat:
         level: INFO
         format: "Pipecat %s: %s"
         args: [role.c_str(), text.c_str()]
-  on_audio_level:
-    # Voice above the threshold re-arms the silence watchdog, but only while
-    # the conversation listens for a follow-up.
-    - if:
-        condition:
-          and:
-            - lambda: 'return input_level > ${pipecat_voice_threshold};'
-            - lambda: 'return id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};'
-        then:
-          - script.execute: pipecat_silence_watchdog
   on_error:
     - logger.log:
         level: WARN
@@ -261,10 +293,13 @@ number:
 
 script:
   # Silence watchdog of the open conversation. Armed when the phase enters
-  # "listening" and re-armed by every voice event above the threshold. When
-  # it fires while the phase is still "listening", nobody spoke for the
-  # whole window and the conversation closes. The fire-time conditions make
-  # a watchdog that was left running harmless after the phase moved on.
+  # "listening". The fire-time condition requires the phase to still be
+  # "listening": if the server VAD heard anything, the phase moved on to
+  # "thinking" and the watchdog is harmless. So the watchdog closes the
+  # window only when the server heard no utterance at all for the whole
+  # timeout — "no voice detected" as judged by the server, not by a local
+  # level threshold (which the DSP AGC keeps above any fixed cutoff in a
+  # normal room).
   - id: pipecat_silence_watchdog
     mode: restart
     then:
