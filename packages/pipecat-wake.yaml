@@ -81,19 +81,34 @@ micro_wake_word:
                                 condition:
                                   lambda: return wake_word == "stop";
                                 then:
-                                  # The internal "stop" model is only enabled
-                                  # while something speaks, so "stop" never
-                                  # starts a conversation.
-                                  - logger.log:
-                                      level: INFO
-                                      format: "Wake word ignored: nothing is speaking"
+                                  # The "stop" model is only enabled while a
+                                  # Pipecat conversation is open (pipecat.yaml)
+                                  # or while the native pipeline speaks (the
+                                  # core enables it, and that case is handled
+                                  # by the running-assistant branch above), so
+                                  # "stop" never starts a conversation. In an
+                                  # open Pipecat window: while the assistant
+                                  # speaks, stop the reply and keep the
+                                  # window; otherwise close the conversation.
                                   - if:
                                       condition:
                                         and:
-                                          - lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
                                           - va_pipecat.connected: pipecat_va
+                                          - lambda: 'return id(voice_assistant_phase) == ${voice_assist_replying_phase_id};'
                                       then:
+                                        - logger.log:
+                                            level: INFO
+                                            format: "Stop word: interrupting the Pipecat reply"
                                         - va_pipecat.interrupt: pipecat_va
+                                      else:
+                                        - if:
+                                            condition:
+                                              va_pipecat.connected: pipecat_va
+                                            then:
+                                              - logger.log:
+                                                  level: INFO
+                                                  format: "Stop word: closing the Pipecat conversation"
+                                              - va_pipecat.stop: pipecat_va
                                 # A real wake word: start the selected backend.
                                 else:
                                   - if:
@@ -102,19 +117,41 @@ micro_wake_word:
                                           - lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
                                           - va_pipecat.connected: pipecat_va
                                       then:
-                                        # Pipecat: play the wake sound, wait
-                                        # the delay that the add-on sends in
-                                        # its hello (covers the chime tail),
-                                        # and open the conversation.
                                         - if:
                                             condition:
-                                              switch.is_on: wake_sound
+                                              # A conversation window is already
+                                              # open (listening, thinking, or
+                                              # speaking).
+                                              lambda: |-
+                                                int p = id(voice_assistant_phase);
+                                                return p == ${voice_assist_listening_for_command_phase_id} || p == ${voice_assist_thinking_phase_id} || p == ${voice_assist_replying_phase_id};
                                             then:
-                                              - script.execute:
-                                                  id: play_sound
-                                                  priority: true
-                                                  sound_file: "wake_word_triggered_sound"
-                                        - delay: !lambda return id(pipecat_va).get_wake_open_delay_ms();
+                                              # Hard reset: close the open
+                                              # conversation, killing any
+                                              # phantom utterance that the wake
+                                              # word audio created on the
+                                              # server, then start a clean
+                                              # turn. No chime: the window was
+                                              # already announced.
+                                              - logger.log:
+                                                  level: INFO
+                                                  format: "Wake word: restarting the open Pipecat conversation"
+                                              - va_pipecat.stop: pipecat_va
+                                              - delay: 300ms
+                                            else:
+                                              # Fresh conversation: play the
+                                              # wake sound and wait the delay
+                                              # that the add-on sends in its
+                                              # hello (covers the chime tail).
+                                              - if:
+                                                  condition:
+                                                    switch.is_on: wake_sound
+                                                  then:
+                                                    - script.execute:
+                                                        id: play_sound
+                                                        priority: true
+                                                        sound_file: "wake_word_triggered_sound"
+                                              - delay: !lambda return id(pipecat_va).get_wake_open_delay_ms();
                                         - if:
                                             condition:
                                               switch.is_on: beam_lock_enabled

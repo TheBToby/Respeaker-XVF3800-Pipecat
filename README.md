@@ -39,6 +39,8 @@ The device gives these entities to Home Assistant:
 | Pipecat connected | binary sensor | Shows that the Pipecat WebSocket is connected |
 | Pipecat phase | text sensor | Shows the phase of the Pipecat conversation |
 | Stop Pipecat conversation | button | Ends the running Pipecat conversation |
+| Stop word | switch | Enables the "Stop" wake word while a Pipecat conversation is open |
+| Pipecat silence timeout | number | Seconds of silence before the open conversation window closes (`0` disables it) |
 | DSP route | select | Chooses what each DSP output channel feeds |
 | ASR output gain | number | Gain on the ASR output (wake word; STT on the ASR route) |
 | AGC max gain (comms) | number | Maximum AGC gain of the comms output (STT on the default route) |
@@ -198,6 +200,8 @@ substitution in a package.
 | `respeaker_lite_ref` | a Respeaker Lite release, set by each release | Release of the voice satellite core. Read [Package layout](#package-layout) |
 | `va_pipecat_ref` | `v0.2.7` | Release of kyvaith/pipecat-homeassistant that holds the `va_pipecat` component. Set it to `main` to follow the newest code |
 | `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
+| `pipecat_silence_timeout_seconds` | `"4"` | Starting value of the **Pipecat silence timeout** number entity |
+| `pipecat_voice_threshold` | `"0.05"` | Microphone level (0.0-1.0) above which the silence watchdog treats the microphone as active |
 | `hidden_ssid` | `"false"` | Set this to `"true"` for a hidden network |
 | `log_level` | `INFO` | Logger level |
 | `voice_assist_*_phase_id` | `1` to `11` | Phase constants for the LED ring |
@@ -228,7 +232,29 @@ decides what it starts:
 - **Home Assistant Assist** — the classic HA pipeline of the voice satellite
   core, unchanged.
 
-While Pipecat speaks, the internal "Stop" wake word interrupts the reply. The
+**The conversation window.** A wake word opens a conversation: the microphone
+streams to the add-on, you talk, the assistant replies, and the window stays
+open for follow-up questions without saying the wake word again. The window
+closes when any of these happens first:
+
+- **Silence.** A watchdog closes the window after a few seconds without voice.
+  Tune it with the **Pipecat silence timeout** number entity (seconds; `0`
+  disables the watchdog; the starting value is the
+  `pipecat_silence_timeout_seconds` substitution).
+- **The add-on's follow-up window.** Set **"Follow-up listening (ms)"** in the
+  add-on Runtime panel (recommended: `10000`). It is the hard ceiling: even
+  mid-sentence, the window closes when it expires, so keep it above the
+  watchdog.
+- **"Stop".** With the **Stop word** switch on, saying "Stop" interrupts the
+  reply while the assistant speaks, and closes the window while it listens.
+  Turn the switch off to disable the stop word entirely.
+- **A new wake word.** Saying the wake word while the window is open restarts
+  the conversation as a clean new turn, without a chime.
+- **Goodbye phrases.** The add-on closes the conversation on phrases like
+  "goodbye" or "that's all".
+
+While the assistant speaks, you can also just talk over it (barge-in): the
+XVF3800 echo cancellation feeds the server VAD, which cancels the reply. The
 LED ring, the wake sound, the media ducking, the beam lock, and the volume
 behave the same for both backends.
 
@@ -238,7 +264,10 @@ behave the same for both backends.
    repository (**Settings > Add-ons > Add-on Store > Repositories**), and
    install the **Pipecat Assist** add-on.
 2. Start the add-on and follow its setup: pick or build a pipeline, and set
-   the satellite secret. Read the add-on documentation for the details.
+   the satellite secret. In the add-on **Runtime** panel, set
+   **"Follow-up listening (ms)"** to about `10000` — it is the hard ceiling of
+   the conversation window on the device (the silence watchdog usually closes
+   it earlier). Read the add-on documentation for the details.
 3. Optional: install the `pipecat_assist` integration through HACS to get a
    Pipecat conversation agent in Home Assistant.
 

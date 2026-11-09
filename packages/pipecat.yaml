@@ -32,6 +32,15 @@ substitutions:
   # the XVF3800 "comms" output with AEC, so it qualifies. Set this to "false"
   # if the assistant hears itself and answers to its own voice.
   pipecat_barge_in: "true"
+  # Silence watchdog of the open conversation window: when the phase stays
+  # "listening" and no voice above pipecat_voice_threshold is heard for this
+  # many seconds, the conversation closes. This is the initial value of the
+  # "Pipecat silence timeout" number entity; tune it in Home Assistant. Set
+  # the entity to 0 to disable the watchdog.
+  pipecat_silence_timeout_seconds: "4"
+  # Microphone level (normalized 0.0-1.0) above which the watchdog treats
+  # the microphone as active and re-arms the silence timer.
+  pipecat_voice_threshold: "0.05"
 
 external_components:
   - source:
@@ -123,21 +132,31 @@ va_pipecat:
           - va_pipecat.set_volume:
               id: pipecat_va
               volume: !lambda return id(external_media_player).volume;
-    # Enable the internal "stop" wake word while the assistant speaks, so
-    # "Stop" interrupts the reply like it stops a native response. While a
-    # timer or the alarm rings, timers-alarm.yaml owns the model.
+    # Arm the silence watchdog for this listening window. Voice above the
+    # threshold (on_audio_level) re-arms it; if it ever fires while the phase
+    # is still "listening", nobody spoke and the conversation closes.
+    - if:
+        condition:
+          lambda: 'return phase == "listening";'
+        then:
+          - script.execute: pipecat_silence_watchdog
+    # Enable the internal "stop" wake word for the whole conversation, so
+    # "Stop" interrupts a reply or closes the window (see the wake word
+    # handler). While a timer or the alarm rings, timers-alarm.yaml owns the
+    # model. The "Stop word" switch disables the feature entirely.
     - if:
         condition:
           and:
-            - lambda: 'return phase == "speaking";'
+            - switch.is_on: stop_word_enabled
             - switch.is_off: timer_ringing
+            - lambda: 'return phase == "listening" || phase == "thinking" || phase == "speaking";'
         then:
           - micro_wake_word.enable_model: stop
     - if:
         condition:
           and:
-            - lambda: 'return phase != "speaking";'
             - switch.is_off: timer_ringing
+            - lambda: 'return !(phase == "listening" || phase == "thinking" || phase == "speaking");'
         then:
           - micro_wake_word.disable_model: stop
     - text_sensor.template.publish:
@@ -149,6 +168,16 @@ va_pipecat:
         level: INFO
         format: "Pipecat %s: %s"
         args: [role.c_str(), text.c_str()]
+  on_audio_level:
+    # Voice above the threshold re-arms the silence watchdog, but only while
+    # the conversation listens for a follow-up.
+    - if:
+        condition:
+          and:
+            - lambda: 'return input_level > ${pipecat_voice_threshold};'
+            - lambda: 'return id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};'
+        then:
+          - script.execute: pipecat_silence_watchdog
   on_error:
     - logger.log:
         level: WARN
@@ -189,3 +218,57 @@ button:
     entity_category: config
     on_press:
       - va_pipecat.stop: pipecat_va
+
+switch:
+  # Gates the internal "stop" wake word. While it is on, "Stop" interrupts a
+  # Pipecat reply or closes an open conversation window (see the wake word
+  # handler in pipecat-wake.yaml). Turn it off to disable the stop word.
+  - platform: template
+    name: "Stop word"
+    id: stop_word_enabled
+    icon: "mdi:stop-circle-outline"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+number:
+  # Initial silence timeout of the conversation watchdog (see the script
+  # below). Tunable at runtime in Home Assistant; 0 disables the watchdog.
+  - platform: template
+    name: "Pipecat silence timeout"
+    id: pipecat_silence_timeout
+    icon: "mdi:timer-outline"
+    entity_category: config
+    unit_of_measurement: "s"
+    min_value: 0
+    max_value: 60
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: ${pipecat_silence_timeout_seconds}
+
+script:
+  # Silence watchdog of the open conversation. Armed when the phase enters
+  # "listening" and re-armed by every voice event above the threshold. When
+  # it fires while the phase is still "listening", nobody spoke for the
+  # whole window and the conversation closes. The fire-time conditions make
+  # a watchdog that was left running harmless after the phase moved on.
+  - id: pipecat_silence_watchdog
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(pipecat_silence_timeout).state > 0;'
+          then:
+            - delay: !lambda return (uint32_t) (id(pipecat_silence_timeout).state * 1000);
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return id(pipecat_va).is_connected();'
+                    - lambda: 'return id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};'
+                then:
+                  - logger.log:
+                      level: INFO
+                      format: "Pipecat: no voice for %u s, closing the conversation"
+                      args: ['(unsigned) id(pipecat_silence_timeout).state']
+                  - va_pipecat.stop: pipecat_va
