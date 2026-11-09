@@ -110,12 +110,15 @@ speaker:
     output_speaker: media_mixing_input
     sample_rate: 48000
     bits_per_sample: 16
-  # Pipecat realtime assistant. The va_pipecat downlink is PCM16 mono at
-  # 24 kHz. The resampler brings it to the mixer rate of 48 kHz.
+  # Pipecat realtime assistant. The va_pipecat downlink arrives as PCM16 mono
+  # at 24 kHz. The sample_rate here is the OUTPUT rate, and the mixer requires
+  # all inputs at the same rate: it converts 24 kHz up to the 48 kHz of the
+  # other mixing inputs. The hardware I2S speaker runs in secondary mode at a
+  # fixed 48 kHz and rejects any other rate.
   - platform: resampler
     id: pipecat_resampling_speaker
     output_speaker: pipecat_mixing_input
-    sample_rate: 24000
+    sample_rate: 48000
     bits_per_sample: 16
 
 respeaker_xvf3800:
