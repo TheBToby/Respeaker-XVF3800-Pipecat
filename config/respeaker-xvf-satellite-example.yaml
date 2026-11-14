@@ -62,8 +62,12 @@ wifi:
   # Add power management and connection optimizations
   power_save_mode: none  # Disable power saving for better performance
   reboot_timeout: 10min  # Prevent unnecessary reboots
-  # Example: Reduce power to 10 dBm
-  output_power: 8.5dB
+  # CAUTION: a low output power can silently starve the continuous ~256 kbit/s
+  # microphone uplink of the Pipecat conversation: control messages still get
+  # through, but the server receives no usable audio and every session aborts
+  # with "no speech detected". If voice detection stops working, remove this
+  # line (or raise it) and test again.
+  # output_power: 8.5dB
 
 logger:
   level: INFO
