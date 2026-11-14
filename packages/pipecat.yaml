@@ -74,8 +74,14 @@ globals:
     initial_value: '10'
   # Set by the phase mapping when a phase arrives without a wake-driven
   # conversation (server-initiated turn) or when the conversation budget ran
-  # out; the phase automation then closes the session.
+  # out; the phase automation then closes the session. Latched until the
+  # next wake-driven listening entry, so trailing phases of an aborted turn
+  # do not re-trigger stop after stop.
   - id: pipecat_close_session
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: pipecat_guard_latched
     type: bool
     restore_value: no
     initial_value: 'false'
@@ -158,8 +164,10 @@ va_pipecat:
           // After idle (or at boot) this listening entry starts a new
           // conversation and resets its budget; after thinking, speaking, or
           // listening it only re-opens a follow-up window of the same one.
+          // A wake-driven entry also clears the guard latch.
           if (prev == ${voice_assist_idle_phase_id} || prev == ${voice_assist_error_phase_id} || prev == ${voice_assist_not_ready_phase_id}) {
             id(pipecat_conversation_start_ms) = millis();
+            id(pipecat_guard_latched) = false;
           }
         } else if (phase == "thinking") {
           // The server VAD closed the utterance: release the beam, like the
@@ -179,10 +187,12 @@ va_pipecat:
         // Wake-gate guard: phases that arrive without a wake-driven
         // conversation are server-initiated (the session memory resumes its
         // context after a reconnect and the model may greet or react to room
-        // noise). Abort them before they can listen or trigger anything in
-        // Home Assistant.
-        if (id(pipecat_conversation_start_ms) == 0 &&
+        // noise). Abort them once (latched — trailing phases of the aborted
+        // turn must not re-trigger stop after stop); the latch clears on the
+        // next wake-driven listening entry above.
+        if (!id(pipecat_guard_latched) && id(pipecat_conversation_start_ms) == 0 &&
             (phase == "listening" || phase == "thinking" || phase == "speaking")) {
+          id(pipecat_guard_latched) = true;
           id(pipecat_close_session) = true;
         }
         // Budget: a follow-up window of a conversation older than the budget
