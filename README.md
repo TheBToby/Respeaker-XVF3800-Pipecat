@@ -212,7 +212,7 @@ substitution in a package.
 | `respeaker_ref` | the current release, for example `2026.9.1` | Release for the packages, the components, and the firmware |
 | `respeaker_lite_ref` | a Respeaker Lite release, set by each release | Release of the voice satellite core. Read [Package layout](#package-layout) |
 | `va_pipecat_ref` | `v0.2.7` | Release of kyvaith/pipecat-homeassistant that holds the `va_pipecat` component. Set it to `main` to follow the newest code |
-| `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
+| `pipecat_barge_in` | `"false"` | Keep the microphone open while the Pipecat assistant speaks, so you can talk over a reply (the server VAD cancels it). `"false"` (default) gates the microphone off during replies — recommended in noisy rooms; the **Stop word** still interrupts |
 | `pipecat_silence_timeout_seconds` | `"8"` | Starting value of the **Pipecat silence timeout** number entity |
 | `pipecat_voice_threshold` | `"0.05"` | Microphone envelope level (0.0-1.0) above which the silence watchdog treats the microphone as active |
 | `pipecat_conversation_budget_seconds` | `"30"` | Hard budget for one conversation: follow-up windows stop re-opening after this age, even if noise keeps triggering turns. `0` disables it |
@@ -277,17 +277,30 @@ add-on (**Runtime** panel, **"Follow-up listening (ms)"**):
   Turn the switch off to disable the stop word entirely.
 - **A new wake word.** Saying the wake word while the window is open restarts
   the conversation as a clean new turn, without a chime.
+- **The budget, always.** A conversation can also simply run out of its
+  budget while a follow-up window is open.
 - **Goodbye phrases.** The add-on closes the conversation on phrases like
   "goodbye" or "that's all" (English and Polish phrases; your language may
   not match, which is what the budget and the stop word are for).
 
-**Noisy households.** While the window is open, the server VAD hears room
-speech and can start turns you never asked for (greetings in random
-languages are the tell-tale sign). If that happens, set **"Follow-up
-listening (ms)"** to `0`: every conversation is then exactly one wake word →
-one command → one reply, and the microphone only ever opens on a wake word.
-If replies get interrupted by room noise, set `pipecat_barge_in` to
-`"false"` as a last resort.
+**The assistant never talks or listens on its own.** Phases that arrive
+without a wake word (the add-on's session memory greeting you after a
+reconnect, or the model reacting to room noise) are aborted immediately —
+they cannot open the microphone or trigger anything in Home Assistant.
+
+**Noisy households.** With the defaults (follow-up `0`, barge-in `false`),
+every conversation is exactly one wake word → one command → one reply, the
+microphone is gated off while the assistant speaks, and room noise can start
+nothing. Only loosen these if your room is quiet enough for hands-free
+follow-ups and talk-over.
+
+While the assistant speaks with `pipecat_barge_in` set to `"true"`, you can
+talk over a reply: the XVF3800 echo cancellation feeds the server VAD, which
+cancels it. Rapid echo detections of the same wake word are debounced
+(`pipecat_wake_debounce_ms`), and if the Pipecat connection drops, a stray
+native pipeline from a fallback is cleaned up on the next wake and once a
+second while Pipecat is connected. The LED ring, the wake sound, the media
+ducking, the beam lock, and the volume behave the same for both backends.
 
 While the assistant speaks, you can also just talk over it (barge-in): the
 XVF3800 echo cancellation feeds the server VAD, which cancels the reply. Rapid

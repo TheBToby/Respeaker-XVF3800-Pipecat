@@ -28,10 +28,11 @@ substitutions:
   # Release of kyvaith/pipecat-homeassistant that holds the va_pipecat
   # component. Set it to "main" to follow the newest code.
   va_pipecat_ref: v0.2.7
-  # Barge-in needs a microphone path with echo control. i2s_mics channel 0 is
-  # the XVF3800 "comms" output with AEC, so it qualifies. Set this to "false"
-  # if the assistant hears itself and answers to its own voice.
-  pipecat_barge_in: "true"
+  # Barge-in keeps the microphone open while the assistant speaks (talk-over).
+  # "false" (default) gates the microphone off during replies, which keeps
+  # room noise and TTS echo out of the pipeline. The "Stop" wake word still
+  # interrupts a reply (it runs locally on the wake word channel).
+  pipecat_barge_in: "false"
   # Silence watchdog: the conversation closes when the phase stays
   # "listening" and neither the server (no new utterance) nor the microphone
   # envelope (no sound above pipecat_voice_threshold) saw anything for this
@@ -71,6 +72,13 @@ globals:
     type: int
     restore_value: no
     initial_value: '10'
+  # Set by the phase mapping when a phase arrives without a wake-driven
+  # conversation (server-initiated turn) or when the conversation budget ran
+  # out; the phase automation then closes the session.
+  - id: pipecat_close_session
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   # millis() timestamp of the moment the current listening window opened.
   - id: pipecat_window_open_ms
     type: uint32_t
@@ -133,30 +141,14 @@ va_pipecat:
   # announcements and media.
   speaker: pipecat_resampling_speaker
   on_phase:
-    # Budget guard first: when a FOLLOW-UP window opens and the conversation
-    # is older than the budget, close it instead of listening again.
-    # Noise-triggered turns re-open windows after every reply; the budget
-    # ends that cycle. Fresh conversations reset the budget in the mapping
-    # below.
-    - if:
-        condition:
-          lambda: |-
-            int prev = id(pipecat_prev_phase_id);
-            bool follow_up = prev == ${voice_assist_listening_for_command_phase_id} || prev == ${voice_assist_thinking_phase_id} || prev == ${voice_assist_replying_phase_id};
-            return phase == "listening" && follow_up && ${pipecat_conversation_budget_seconds} > 0 &&
-                   id(pipecat_conversation_start_ms) != 0 &&
-                   millis() - id(pipecat_conversation_start_ms) > (uint32_t) ${pipecat_conversation_budget_seconds} * 1000;
-        then:
-          - logger.log:
-              level: INFO
-              format: "Pipecat: conversation budget of %u s reached, closing the conversation"
-              args: ['(unsigned) ${pipecat_conversation_budget_seconds}']
-          - va_pipecat.stop: pipecat_va
     # Map the Pipecat phase onto the voice assistant phase id that drives the
     # LED ring, so the ring behaves the same for both backends. Also tracks
-    # fresh-vs-follow-up listening entries and the conversation start time.
+    # fresh-vs-follow-up listening entries and the conversation start time,
+    # and decides whether the phase belongs to a wake-driven conversation at
+    # all.
     - lambda: |-
         int prev = id(pipecat_prev_phase_id);
+        id(pipecat_close_session) = false;
         if (phase == "listening") {
           id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
           // The silence watchdog reference starts at the window opening, and
@@ -177,11 +169,40 @@ va_pipecat:
         } else if (phase == "speaking") {
           id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
         } else {
-          // idle and thanks. Safety-net beam unlock, idempotent.
+          // idle and thanks: the conversation is over. Safety-net beam
+          // unlock, idempotent.
           id(respeaker).unlock_beam();
           id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          id(pipecat_conversation_start_ms) = 0;
         }
         id(pipecat_prev_phase_id) = id(voice_assistant_phase);
+        // Wake-gate guard: phases that arrive without a wake-driven
+        // conversation are server-initiated (the session memory resumes its
+        // context after a reconnect and the model may greet or react to room
+        // noise). Abort them before they can listen or trigger anything in
+        // Home Assistant.
+        if (id(pipecat_conversation_start_ms) == 0 &&
+            (phase == "listening" || phase == "thinking" || phase == "speaking")) {
+          id(pipecat_close_session) = true;
+        }
+        // Budget: a follow-up window of a conversation older than the budget
+        // closes instead of listening again. Noise-triggered turns re-open
+        // windows after every reply; the budget ends that cycle.
+        bool follow_up = (phase == "listening") &&
+                         (prev == ${voice_assist_listening_for_command_phase_id} || prev == ${voice_assist_thinking_phase_id} || prev == ${voice_assist_replying_phase_id});
+        if (follow_up && ${pipecat_conversation_budget_seconds} > 0 &&
+            id(pipecat_conversation_start_ms) != 0 &&
+            millis() - id(pipecat_conversation_start_ms) > (uint32_t) ${pipecat_conversation_budget_seconds} * 1000) {
+          id(pipecat_close_session) = true;
+        }
+    - if:
+        condition:
+          lambda: 'return id(pipecat_close_session);'
+        then:
+          - logger.log:
+              level: INFO
+              format: "Pipecat: closing a conversation that no wake word started or whose budget ran out"
+          - va_pipecat.stop: pipecat_va
     # Duck music while the conversation runs, the same way the native
     # pipeline ducks on start. Pipecat speaks through its own mixer input,
     # so the duck does not lower the assistant itself.
