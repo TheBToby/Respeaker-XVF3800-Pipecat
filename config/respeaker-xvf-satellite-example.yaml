@@ -102,6 +102,16 @@ psram:
   speed: 80MHz
   ignore_not_found: false  # The VPE has PSRAM, so this is safe. Allows configuring WiFi driver to use more resources (done automatically by the speaker media player)
 
+sensor:
+  # Link quality diagnostic: the Pipecat microphone uplink is a continuous
+  # ~256 kbit/s stream. Below roughly -70 dBm it will starve, and the
+  # assistant will hear only fragments. Check this when audio quality or
+  # voice detection degrades.
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+    entity_category: diagnostic
+
 packages:
   respeaker:
     # This fork adds the Pipecat realtime assistant on top of the baseline.
