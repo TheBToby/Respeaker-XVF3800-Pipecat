@@ -94,14 +94,45 @@ Keep `secrets.yaml` out of version control.
 
 ### 2. Make the device configuration
 
-Create a file for your device. The packages give all the other configuration.
+Copy `config/respeaker-xvf-satellite-example.yaml` as the starting point. It
+is the **central configuration file**: it holds all the standard ESPHome
+components (`esphome`, `esp32`, `wifi`, `logger`, `api`, `ota`, `i2c`,
+`psram`), so you can edit them directly in the ESPHome Device Builder. The
+XVF3800 hardware, the voice satellite behavior, and the Pipecat realtime
+assistant come from the packages of this repository:
 
 ```yaml
 substitutions:
   name: respeaker-xvf3800-assistant
   friendly_name: reSpeaker XVF3800 Assistant
   respeaker_ref: 2026.11.0
+  respeaker_lite_ref: 2026.11.0
 
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  # ...
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  domain: .home.arpa
+  power_save_mode: none  # Disable power saving for better performance
+  reboot_timeout: 10min  # Prevent unnecessary reboots
+  output_power: 8.5dB    # Reduce transmit power; tune to your setup
+
+api:
+  custom_services: true  # Required by the va_pipecat auto-provisioning
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret ota_password
+
+# i2c, psram, logger, and esp32 live here as well. The packages bring the
+# XVF3800 hardware, the voice satellite behavior, and Pipecat.
 packages:
   respeaker:
     url: https://github.com/TheBToby/Respeaker-XVF3800-Pipecat
@@ -113,29 +144,11 @@ packages:
       - packages/voice-assistant.yaml
       - packages/leds.yaml
       - packages/timers-alarm.yaml
-      # pipecat.yaml removes the wake word handler of the core, and
-      # pipecat-wake.yaml adds the replacement, so the order matters: wake
-      # comes last.
       - packages/pipecat.yaml
       - packages/pipecat-wake.yaml
-
-# A remote package cannot read secrets, so the credentials go here.
-# ESPHome joins these blocks with the blocks in the packages.
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-
-api:
-  encryption:
-    key: !secret api_key
-
-ota:
-  - platform: esphome
-    id: ota_esphome
-    password: !secret ota_password
 ```
 
-`config/respeaker-xvf-satellite-example.yaml` holds this same configuration.
+`config/respeaker-xvf-satellite-example.yaml` holds the complete file.
 
 ### 3. Build and flash
 
@@ -200,6 +213,7 @@ substitution in a package.
 | `respeaker_lite_ref` | a Respeaker Lite release, set by each release | Release of the voice satellite core. Read [Package layout](#package-layout) |
 | `va_pipecat_ref` | `v0.2.7` | Release of kyvaith/pipecat-homeassistant that holds the `va_pipecat` component. Set it to `main` to follow the newest code |
 | `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
+| `pipecat_follow_ups` | `"false"` | Keep the microphone open after a reply for hands-free follow-up questions. `"false"` (default) closes the session after every reply: the microphone only opens on a wake word. The silence watchdog, the conversation budget, and the stop word only apply while it is `"true"` |
 | `pipecat_silence_timeout_seconds` | `"4"` | Starting value of the **Pipecat silence timeout** number entity |
 | `pipecat_conversation_budget_seconds` | `"30"` | Hard budget for one conversation: follow-up windows stop re-opening after this age, even if noise keeps triggering turns. `0` disables it |
 | `pipecat_wake_debounce_ms` | `"1000"` | Minimum time between two handled wake word detections. micro_wake_word keeps running after a detection, and one utterance can fire a second detection ~150 ms later that would otherwise tear down what the first detection started |
@@ -234,9 +248,12 @@ decides what it starts:
   core, unchanged.
 
 **The conversation window.** A wake word opens a conversation: the microphone
-streams to the add-on, you talk, the assistant replies, and the window stays
-open for follow-up questions without saying the wake word again. The window
-closes when any of these happens first:
+streams to the add-on, you talk, the assistant replies — and the microphone
+closes again. By default a conversation is exactly one wake word → one
+command → one reply, so room noise can never interrupt an open microphone.
+Set the `pipecat_follow_ups` substitution to `"true"` to keep the window open
+after a reply for hands-free follow-up questions. With follow-ups enabled,
+the window closes when any of these happens first:
 
 - **Silence.** A watchdog closes the window when no new utterance arrives for
   a few seconds — the server VAD decides what counts as speech, so amplified
@@ -447,7 +464,7 @@ sounds. Koala Satellite and the Respeaker Lite use the same core. The
 
 | Package | Contents |
 | --- | --- |
-| `base.yaml` | The voice satellite core, `esphome`, `esp32`, `psram`, the logger level, the Wi-Fi tuning, the `set_led_color` action, `i2c`, `external_components` |
+| `base.yaml` | The substitution defaults, the voice satellite core, and the `external_components` sources. The standard ESPHome components (`esphome`, `esp32`, `wifi`, `logger`, `api`, `i2c`, `psram`) live in the central configuration file now, so the Device Builder can edit them |
 | `hardware.yaml` | `i2s_audio`, `microphone`, `speaker`, `audio_dac`, `respeaker_xvf3800` with the DFU firmware |
 | `voice-assistant.yaml` | The beam lock, the wake word gain, the volume range and the volume display of the media player |
 | `leds.yaml` | LED globals, the animation interval, the effect scripts, the colour preset |

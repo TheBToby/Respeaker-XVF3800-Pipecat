@@ -4,6 +4,9 @@
 # The factory firmware includes this file, and a device adopted in the ESPHome
 # dashboard imports it at the release tag. It holds no credentials and no
 # provisioning, so a remote import works without secrets.
+#
+# The standard ESPHome components live here as well (they left the packages
+# in this fork), so the factory build stays complete.
 # =============================================================================
 
 packages:
@@ -17,3 +20,64 @@ packages:
   # order matters: wake comes last.
   pipecat: !include ../../packages/pipecat.yaml
   pipecat_wake: !include ../../packages/pipecat-wake.yaml
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  project:
+    name: formatbce.Respeaker XVF3800 Satellite
+    version: 2026.11.0
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      # Moves instructions and read only data from flash into PSRAM on boot.
+      # Both enabled allows instructions to execute while a flash operation is in progress without needing to be placed in IRAM.
+      # Considerably speeds up mWW at the cost of using more PSRAM.
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"  # TLS1.3 support isn't enabled by default in IDF 5.1.5
+
+# Credentials are not set here. Supply "ssid" and "password" from your own
+# configuration. The two blocks merge.
+wifi:
+  # Add power management and connection optimizations
+  power_save_mode: none  # Disable power saving for better performance
+  reboot_timeout: 10min  # Prevent unnecessary reboots
+
+logger:
+  level: ${log_level}
+  initial_level: ${log_level}
+  logs:
+    sensor: WARN
+    voice_assistant: INFO
+    micro_wake_word: INFO
+    i2s_audio: WARN
+    respeaker_xvf3800: INFO
+
+i2c:
+  - id: internal_i2c
+    sda: GPIO5
+    scl: GPIO6
+    scan: true
+    frequency: 400kHz
+
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false  # The VPE has PSRAM, so this is safe. Allows configuring WiFi driver to use more resources (done automatically by the speaker media player)

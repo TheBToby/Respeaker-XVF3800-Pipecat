@@ -38,6 +38,14 @@ substitutions:
   # "Pipecat silence timeout" number entity; tune it in Home Assistant. Set
   # the entity to 0 to disable the watchdog.
   pipecat_silence_timeout_seconds: "4"
+  # Follow-up windows after a reply. "false" (default) closes the session as
+  # soon as the reply ends, so the microphone only ever opens on a wake word.
+  # This strongly limits the realtime conversation feature, but it also
+  # ignores environment noise that otherwise interrupts open conversations.
+  # "true" keeps the window open for hands-free follow-ups; the silence
+  # watchdog, the conversation budget, the stop word, and the add-on
+  # "Follow-up listening (ms)" setting then apply.
+  pipecat_follow_ups: "false"
   # Hard budget for one conversation: when a follow-up window opens and the
   # conversation is older than this, it closes instead of listening again.
   # Noise-triggered turns in a loud room re-open the window after every
@@ -116,11 +124,25 @@ va_pipecat:
   # announcements and media.
   speaker: pipecat_resampling_speaker
   on_phase:
-    # Budget guard first: when a FOLLOW-UP window opens and the conversation
-    # is older than the budget, close it instead of listening again.
-    # Noise-triggered turns re-open windows after every reply; the budget
-    # ends that cycle. Fresh conversations reset the budget in the mapping
-    # below.
+    # Follow-ups disabled (the default): when the follow-up window of a
+    # finished reply opens, close the session right away, so the microphone
+    # only ever opens on a wake word.
+    - if:
+        condition:
+          lambda: |-
+            int prev = id(pipecat_prev_phase_id);
+            bool follow_up = prev == ${voice_assist_listening_for_command_phase_id} || prev == ${voice_assist_thinking_phase_id} || prev == ${voice_assist_replying_phase_id};
+            return !${pipecat_follow_ups} && phase == "listening" && follow_up;
+        then:
+          - logger.log:
+              level: INFO
+              format: "Pipecat: follow-ups disabled, closing the conversation after the reply"
+          - va_pipecat.stop: pipecat_va
+    # Budget guard next: when follow-ups are enabled and a FOLLOW-UP window
+    # opens while the conversation is older than the budget, close it instead
+    # of listening again. Noise-triggered turns re-open windows after every
+    # reply; the budget ends that cycle. Fresh conversations reset the budget
+    # in the mapping below.
     - if:
         condition:
           lambda: |-
