@@ -213,8 +213,8 @@ substitution in a package.
 | `respeaker_lite_ref` | a Respeaker Lite release, set by each release | Release of the voice satellite core. Read [Package layout](#package-layout) |
 | `va_pipecat_ref` | `v0.2.7` | Release of kyvaith/pipecat-homeassistant that holds the `va_pipecat` component. Set it to `main` to follow the newest code |
 | `pipecat_barge_in` | `"true"` | Keep the microphone open while the Pipecat assistant speaks, so the server VAD can detect barge-in. Set this to `"false"` if the assistant hears itself |
-| `pipecat_follow_ups` | `"false"` | Keep the microphone open after a reply for hands-free follow-up questions. `"false"` (default) closes the session after every reply: the microphone only opens on a wake word. The silence watchdog, the conversation budget, and the stop word only apply while it is `"true"` |
-| `pipecat_silence_timeout_seconds` | `"4"` | Starting value of the **Pipecat silence timeout** number entity |
+| `pipecat_silence_timeout_seconds` | `"8"` | Starting value of the **Pipecat silence timeout** number entity |
+| `pipecat_voice_threshold` | `"0.05"` | Microphone envelope level (0.0-1.0) above which the silence watchdog treats the microphone as active |
 | `pipecat_conversation_budget_seconds` | `"30"` | Hard budget for one conversation: follow-up windows stop re-opening after this age, even if noise keeps triggering turns. `0` disables it |
 | `pipecat_wake_debounce_ms` | `"1000"` | Minimum time between two handled wake word detections. micro_wake_word keeps running after a detection, and one utterance can fire a second detection ~150 ms later that would otherwise tear down what the first detection started |
 | `hidden_ssid` | `"false"` | Set this to `"true"` for a hidden network |
@@ -249,21 +249,25 @@ decides what it starts:
 
 **The conversation window.** A wake word opens a conversation: the microphone
 streams to the add-on, you talk, the assistant replies — and the microphone
-closes again. By default a conversation is exactly one wake word → one
-command → one reply, so room noise can never interrupt an open microphone.
-Set the `pipecat_follow_ups` substitution to `"true"` to keep the window open
-after a reply for hands-free follow-up questions. With follow-ups enabled,
-the window closes when any of these happens first:
+closes again. How long the microphone stays open after a reply is set in the
+add-on (**Runtime** panel, **"Follow-up listening (ms)"**):
 
-- **Silence.** A watchdog closes the window when no new utterance arrives for
-  a few seconds — the server VAD decides what counts as speech, so amplified
-  room noise cannot fool it. Tune it with the **Pipecat silence timeout**
-  number entity (seconds; `0` disables the watchdog; the starting value is
-  the `pipecat_silence_timeout_seconds` substitution).
-- **The add-on's follow-up window.** Set **"Follow-up listening (ms)"** in the
-  add-on Runtime panel (recommended: `10000`, or `0` in a noisy household —
-  see below). It is the hard ceiling: even mid-sentence, the window closes
-  when it expires, so keep it above the watchdog.
+- **`0` (recommended in noisy rooms)** — strictly wake-gated: one wake word →
+  one command → one reply, and the microphone only ever opens on a wake
+  word. Room noise can never start or interrupt anything.
+- **`> 0` (e.g. `10000`)** — hands-free follow-up window: after a reply the
+  microphone stays open, and the window closes when any of these happens
+  first:
+
+- **Silence.** A watchdog closes the window when neither the server (no new
+  utterance) nor the microphone envelope (no sound above
+  `pipecat_voice_threshold`) saw anything for the **Pipecat silence timeout**
+  (number entity, seconds; `0` disables it; starting value
+  `pipecat_silence_timeout_seconds`, default `8`). A command in progress
+  refreshes the timeout, so it is never cut off mid-sentence.
+- **The add-on's follow-up window.** The value above is the hard ceiling:
+  even mid-sentence, the window closes when it expires, so keep it above the
+  silence timeout.
 - **The conversation budget.** A conversation never lives longer than
   `pipecat_conversation_budget_seconds` (default `30`). Noise-triggered turns
   re-open the follow-up window after every reply; the budget ends that cycle.

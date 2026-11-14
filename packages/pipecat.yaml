@@ -32,20 +32,16 @@ substitutions:
   # the XVF3800 "comms" output with AEC, so it qualifies. Set this to "false"
   # if the assistant hears itself and answers to its own voice.
   pipecat_barge_in: "true"
-  # Silence watchdog of the open conversation window: when the phase stays
-  # "listening" for this many seconds without the server starting a new
-  # utterance, the conversation closes. This is the initial value of the
-  # "Pipecat silence timeout" number entity; tune it in Home Assistant. Set
-  # the entity to 0 to disable the watchdog.
-  pipecat_silence_timeout_seconds: "4"
-  # Follow-up windows after a reply. "false" (default) closes the session as
-  # soon as the reply ends, so the microphone only ever opens on a wake word.
-  # This strongly limits the realtime conversation feature, but it also
-  # ignores environment noise that otherwise interrupts open conversations.
-  # "true" keeps the window open for hands-free follow-ups; the silence
-  # watchdog, the conversation budget, the stop word, and the add-on
-  # "Follow-up listening (ms)" setting then apply.
-  pipecat_follow_ups: "false"
+  # Silence watchdog: the conversation closes when the phase stays
+  # "listening" and neither the server (no new utterance) nor the microphone
+  # envelope (no sound above pipecat_voice_threshold) saw anything for this
+  # many seconds. This is the initial value of the "Pipecat silence timeout"
+  # number entity; tune it in Home Assistant. Set the entity to 0 to
+  # disable the watchdog.
+  pipecat_silence_timeout_seconds: "8"
+  # Microphone envelope level (normalized 0.0-1.0) above which the watchdog
+  # treats the microphone as active and refreshes its silence reference.
+  pipecat_voice_threshold: "0.05"
   # Hard budget for one conversation: when a follow-up window opens and the
   # conversation is older than this, it closes instead of listening again.
   # Noise-triggered turns in a loud room re-open the window after every
@@ -75,6 +71,19 @@ globals:
     type: int
     restore_value: no
     initial_value: '10'
+  # millis() timestamp of the moment the current listening window opened.
+  - id: pipecat_window_open_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # millis() timestamp of the last microphone envelope above the voice
+  # threshold (on_audio_level), and of the window opening itself. The
+  # silence watchdog closes the window when this reference ages past the
+  # timeout without a server utterance in between.
+  - id: pipecat_last_voice_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 external_components:
   - source:
@@ -124,25 +133,11 @@ va_pipecat:
   # announcements and media.
   speaker: pipecat_resampling_speaker
   on_phase:
-    # Follow-ups disabled (the default): when the follow-up window of a
-    # finished reply opens, close the session right away, so the microphone
-    # only ever opens on a wake word.
-    - if:
-        condition:
-          lambda: |-
-            int prev = id(pipecat_prev_phase_id);
-            bool follow_up = prev == ${voice_assist_listening_for_command_phase_id} || prev == ${voice_assist_thinking_phase_id} || prev == ${voice_assist_replying_phase_id};
-            return !${pipecat_follow_ups} && phase == "listening" && follow_up;
-        then:
-          - logger.log:
-              level: INFO
-              format: "Pipecat: follow-ups disabled, closing the conversation after the reply"
-          - va_pipecat.stop: pipecat_va
-    # Budget guard next: when follow-ups are enabled and a FOLLOW-UP window
-    # opens while the conversation is older than the budget, close it instead
-    # of listening again. Noise-triggered turns re-open windows after every
-    # reply; the budget ends that cycle. Fresh conversations reset the budget
-    # in the mapping below.
+    # Budget guard first: when a FOLLOW-UP window opens and the conversation
+    # is older than the budget, close it instead of listening again.
+    # Noise-triggered turns re-open windows after every reply; the budget
+    # ends that cycle. Fresh conversations reset the budget in the mapping
+    # below.
     - if:
         condition:
           lambda: |-
@@ -164,6 +159,10 @@ va_pipecat:
         int prev = id(pipecat_prev_phase_id);
         if (phase == "listening") {
           id(voice_assistant_phase) = ${voice_assist_listening_for_command_phase_id};
+          // The silence watchdog reference starts at the window opening, and
+          // on_audio_level refreshes it while anyone makes a sound.
+          id(pipecat_last_voice_ms) = millis();
+          id(pipecat_window_open_ms) = millis();
           // After idle (or at boot) this listening entry starts a new
           // conversation and resets its budget; after thinking, speaking, or
           // listening it only re-opens a follow-up window of the same one.
@@ -208,14 +207,6 @@ va_pipecat:
           - va_pipecat.set_volume:
               id: pipecat_va
               volume: !lambda return id(external_media_player).volume;
-    # Arm the silence watchdog for this listening window. Voice above the
-    # threshold (on_audio_level) re-arms it; if it ever fires while the phase
-    # is still "listening", nobody spoke and the conversation closes.
-    - if:
-        condition:
-          lambda: 'return phase == "listening";'
-        then:
-          - script.execute: pipecat_silence_watchdog
     # Enable the internal "stop" wake word for the whole conversation, so
     # "Stop" interrupts a reply or closes the window (see the wake word
     # handler). While a timer or the alarm rings, timers-alarm.yaml owns the
@@ -244,6 +235,14 @@ va_pipecat:
         level: INFO
         format: "Pipecat %s: %s"
         args: [role.c_str(), text.c_str()]
+  on_audio_level:
+    # Sound above the threshold refreshes the silence watchdog reference, so
+    # a command in progress is never cut off mid-sentence.
+    - if:
+        condition:
+          lambda: 'return input_level > ${pipecat_voice_threshold};'
+        then:
+          - lambda: id(pipecat_last_voice_ms) = millis();
   on_error:
     - logger.log:
         level: WARN
@@ -313,31 +312,43 @@ number:
     restore_value: true
     initial_value: ${pipecat_silence_timeout_seconds}
 
-script:
-  # Silence watchdog of the open conversation. Armed when the phase enters
-  # "listening". The fire-time condition requires the phase to still be
-  # "listening": if the server VAD heard anything, the phase moved on to
-  # "thinking" and the watchdog is harmless. So the watchdog closes the
-  # window only when the server heard no utterance at all for the whole
-  # timeout — "no voice detected" as judged by the server, not by a local
-  # level threshold (which the DSP AGC keeps above any fixed cutoff in a
-  # normal room).
-  - id: pipecat_silence_watchdog
-    mode: restart
+interval:
+  # Silence watchdog of the open conversation, checked once a second. The
+  # reference (pipecat_last_voice_ms) starts when the window opens and is
+  # refreshed by every microphone envelope above pipecat_voice_threshold
+  # (on_audio_level), so a command in progress is never cut off. The
+  # fire-time condition requires the phase to still be "listening": once the
+  # server VAD closes an utterance ("thinking") the watchdog stands down and
+  # the reply plays out. The "Pipecat silence timeout" number entity holds
+  # the seconds; 0 disables the watchdog.
+  - interval: 1s
     then:
       - if:
           condition:
-            lambda: 'return id(pipecat_silence_timeout).state > 0;'
+            lambda: |-
+              return id(pipecat_silence_timeout).state > 0 &&
+                     id(pipecat_va).is_connected() &&
+                     id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id} &&
+                     millis() - id(pipecat_last_voice_ms) > (uint32_t) id(pipecat_silence_timeout).state * 1000;
           then:
-            - delay: !lambda return (uint32_t) (id(pipecat_silence_timeout).state * 1000);
-            - if:
-                condition:
-                  and:
-                    - lambda: 'return id(pipecat_va).is_connected();'
-                    - lambda: 'return id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};'
-                then:
-                  - logger.log:
-                      level: INFO
-                      format: "Pipecat: no voice for %u s, closing the conversation"
-                      args: ['(unsigned) id(pipecat_silence_timeout).state']
-                  - va_pipecat.stop: pipecat_va
+            - logger.log:
+                level: INFO
+                format: "Pipecat: no voice for %u s, closing the conversation"
+                args: ['(unsigned) id(pipecat_silence_timeout).state']
+            - va_pipecat.stop: pipecat_va
+      # A stray native pipeline (Home Assistant can start one around a wake
+      # word event) would stream the microphone to two backends at once.
+      # While a Pipecat session is connected, stop it within a second. When
+      # Pipecat is disconnected, the fallback pipeline runs legitimately and
+      # is left alone.
+      - if:
+          condition:
+            and:
+              - lambda: 'return id(assistant_source).current_option() == "Pipecat realtime";'
+              - lambda: 'return id(pipecat_va).is_connected();'
+              - voice_assistant.is_running:
+          then:
+            - logger.log:
+                level: INFO
+                format: "Pipecat: stopping the stray native voice assistant"
+            - voice_assistant.stop:
