@@ -98,6 +98,15 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: '0'
+  # millis() timestamp of the last progress in the conversation: every
+  # phase change and every audio envelope above the threshold refreshes it.
+  # The session watchdog closes a conversation that stops making progress
+  # (e.g. stuck in "follow-up queued until local playback drains" when the
+  # final audio tail of a reply stalls mid-delivery).
+  - id: pipecat_last_progress_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
 
 external_components:
   - source:
@@ -184,6 +193,8 @@ va_pipecat:
           id(pipecat_conversation_start_ms) = 0;
         }
         id(pipecat_prev_phase_id) = id(voice_assistant_phase);
+        // Every phase change is progress for the session watchdog.
+        id(pipecat_last_progress_ms) = millis();
         // Wake-gate guard: phases that arrive without a wake-driven
         // conversation are server-initiated (the session memory resumes its
         // context after a reconnect and the model may greet or react to room
@@ -267,13 +278,16 @@ va_pipecat:
         format: "Pipecat %s: %s"
         args: [role.c_str(), text.c_str()]
   on_audio_level:
-    # Sound above the threshold refreshes the silence watchdog reference, so
-    # a command in progress is never cut off mid-sentence.
+    # Sound above the threshold refreshes the watchdog references, so a
+    # command in progress is never cut off mid-sentence and a playing reply
+    # is never closed while it is audible.
     - if:
         condition:
-          lambda: 'return input_level > ${pipecat_voice_threshold};'
+          lambda: 'return input_level > ${pipecat_voice_threshold} || output_level > ${pipecat_voice_threshold};'
         then:
-          - lambda: id(pipecat_last_voice_ms) = millis();
+          - lambda: |-
+              id(pipecat_last_voice_ms) = millis();
+              id(pipecat_last_progress_ms) = millis();
   on_error:
     - logger.log:
         level: WARN
@@ -344,27 +358,34 @@ number:
     initial_value: ${pipecat_silence_timeout_seconds}
 
 interval:
-  # Silence watchdog of the open conversation, checked once a second. The
-  # reference (pipecat_last_voice_ms) starts when the window opens and is
-  # refreshed by every microphone envelope above pipecat_voice_threshold
-  # (on_audio_level), so a command in progress is never cut off. The
-  # fire-time condition requires the phase to still be "listening": once the
-  # server VAD closes an utterance ("thinking") the watchdog stands down and
-  # the reply plays out. The "Pipecat silence timeout" number entity holds
-  # the seconds; 0 disables the watchdog.
+  # Session watchdog, checked once a second. While a Pipecat conversation is
+  # active (listening, thinking, or speaking) it closes the session when it
+  # stops making progress: no new utterance from the server AND no audio
+  # envelope above pipecat_voice_threshold for the timeout. This catches
+  # sessions that hang in "follow-up queued until local playback drains"
+  # when the final audio tail of a reply stalls mid-delivery, and aborts
+  # wake words nobody spoke. Thinking gets three times the timeout, because
+  # slow Home Assistant tool calls are normal. The "Pipecat silence timeout"
+  # number entity holds the seconds; 0 disables the watchdog.
   - interval: 1s
     then:
       - if:
           condition:
             lambda: |-
-              return id(pipecat_silence_timeout).state > 0 &&
-                     id(pipecat_va).is_connected() &&
-                     id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id} &&
-                     millis() - id(pipecat_last_voice_ms) > (uint32_t) id(pipecat_silence_timeout).state * 1000;
+              if (id(pipecat_silence_timeout).state <= 0 || !id(pipecat_va).is_connected()) {
+                return false;
+              }
+              int p = id(voice_assistant_phase);
+              bool active = (p == ${voice_assist_listening_for_command_phase_id} || p == ${voice_assist_thinking_phase_id} || p == ${voice_assist_replying_phase_id});
+              if (!active) {
+                return false;
+              }
+              uint32_t limit = (uint32_t) id(pipecat_silence_timeout).state * 1000 * (p == ${voice_assist_thinking_phase_id} ? 3 : 1);
+              return (millis() - id(pipecat_last_voice_ms) > limit) && (millis() - id(pipecat_last_progress_ms) > limit);
           then:
             - logger.log:
                 level: INFO
-                format: "Pipecat: no voice for %u s, closing the conversation"
+                format: "Pipecat: no progress for %u s, closing the conversation"
                 args: ['(unsigned) id(pipecat_silence_timeout).state']
             - va_pipecat.stop: pipecat_va
       # A stray native pipeline (Home Assistant can start one around a wake
